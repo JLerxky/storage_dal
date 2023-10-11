@@ -1,0 +1,18 @@
+[package]
+name = "storage_dal_derive"
+version = "0.1.0"
+authors = ["JLer <jlerxky@live.com>"]
+edition = "2021"
+description = "storage_dal macro"
+categories = ["storage"]
+keywords = ["DAL", "opendal"]
+readme = "README.md"
+repository = "https://github.com/JLerxky/storage_dal"
+license = "Apache-2.0"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = "2.0"
+quote = "1.0"

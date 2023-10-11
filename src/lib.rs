@@ -15,6 +15,7 @@ use opendal::{layers::LoggingLayer, services, BlockingLister, Builder, Lister, O
 use serde::{Deserialize, Serialize};
 
 const SEQUENCE_TREE_NAME: &str = "SEQUENCE";
+const STRUCTURED_TREE_NAME: &str = "STRUCTURED";
 
 pub trait StorageData: Debug + Clone + Default + for<'a> Deserialize<'a> + Serialize {
     fn name() -> String;
@@ -22,7 +23,7 @@ pub trait StorageData: Debug + Clone + Default + for<'a> Deserialize<'a> + Seria
 
 #[derive(Debug)]
 pub struct Storage {
-    op: Operator,
+    pub op: Operator,
 }
 
 impl Default for Storage {
@@ -81,11 +82,15 @@ impl Storage {
         builder.datadir(path);
         Self::new(builder)
     }
+}
 
-    pub fn get<T: for<'a> Deserialize<'a> + StorageData>(
-        &self,
-        key: impl AsRef<[u8]>,
-    ) -> Option<T> {
+fn build_key<T: for<'a> Deserialize<'a> + StorageData>(key: &str) -> String {
+    format!("{STRUCTURED_TREE_NAME}/{}/{}", T::name(), key)
+}
+
+// structured data
+impl Storage {
+    pub fn get<T: for<'a> Deserialize<'a> + StorageData>(&self, key: &str) -> Option<T> {
         match self.op.blocking().read(&build_key::<T>(key)) {
             Ok(v) => bincode::deserialize(&v).ok(),
             _ => None,
@@ -94,7 +99,7 @@ impl Storage {
 
     pub async fn get_async<T: for<'a> Deserialize<'a> + StorageData>(
         &self,
-        key: impl AsRef<[u8]>,
+        key: &str,
     ) -> Option<T> {
         match self.op.read(&build_key::<T>(key)).await {
             Ok(v) => bincode::deserialize(&v).ok(),
@@ -102,33 +107,34 @@ impl Storage {
         }
     }
 
-    pub fn read<T: for<'a> Deserialize<'a> + StorageData>(&self, path: &str) -> Option<T> {
+    pub fn get_by_path<T: for<'a> Deserialize<'a>>(&self, path: &str) -> Option<T> {
         match self.op.blocking().read(path) {
             Ok(v) => bincode::deserialize(&v).ok(),
             _ => None,
         }
     }
 
-    pub async fn read_async<T: for<'a> Deserialize<'a> + StorageData>(
-        &self,
-        path: &str,
-    ) -> Option<T> {
+    pub async fn get_async_by_path<T: for<'a> Deserialize<'a>>(&self, path: &str) -> Option<T> {
         match self.op.read(path).await {
             Ok(v) => bincode::deserialize(&v).ok(),
             _ => None,
         }
     }
 
-    pub fn scan<T: for<'a> Deserialize<'a> + StorageData>(&self) -> BlockingLister {
+    pub fn scan<T: StorageData>(&self) -> BlockingLister {
         let op = self.op.blocking();
-        op.lister(&(T::name() + "/")).unwrap()
+        op.lister(&format!("{STRUCTURED_TREE_NAME}/{}/", T::name()))
+            .unwrap()
     }
 
-    pub async fn scan_async<T: for<'a> Deserialize<'a> + StorageData>(&self) -> Lister {
-        self.op.lister(&(T::name() + "/")).await.unwrap()
+    pub async fn scan_async<T: StorageData>(&self) -> Lister {
+        self.op
+            .lister(&format!("{STRUCTURED_TREE_NAME}/{}/", T::name()))
+            .await
+            .unwrap()
     }
 
-    pub fn insert<T: Serialize + StorageData>(&self, key: impl AsRef<[u8]>, value: T) -> Option<T> {
+    pub fn insert<T: Serialize + StorageData>(&self, key: &str, value: T) -> Option<T> {
         if self
             .op
             .blocking()
@@ -141,11 +147,7 @@ impl Storage {
         }
     }
 
-    pub async fn insert_async<T: Serialize + StorageData>(
-        &self,
-        key: impl AsRef<[u8]>,
-        value: T,
-    ) -> Option<T> {
+    pub async fn insert_async<T: Serialize + StorageData>(&self, key: &str, value: T) -> Option<T> {
         if self
             .op
             .write(&build_key::<T>(key), bincode::serialize(&value).unwrap())
@@ -158,31 +160,33 @@ impl Storage {
         }
     }
 
-    pub fn remove<T: Serialize + StorageData>(&self, key: impl AsRef<[u8]>) -> bool {
+    pub fn remove<T: Serialize + StorageData>(&self, key: &str) -> bool {
         self.op.blocking().delete(&build_key::<T>(key)).is_ok()
     }
 
-    pub async fn remove_async<T: Serialize + StorageData>(&self, key: impl AsRef<[u8]>) -> bool {
+    pub async fn remove_async<T: Serialize + StorageData>(&self, key: &str) -> bool {
         self.op.delete(&build_key::<T>(key)).await.is_ok()
     }
+}
 
+// SEQUENCE
+impl Storage {
     pub fn next(&self, name: &str) -> u32 {
         let path = format!("{}/{}", SEQUENCE_TREE_NAME, name);
         let op = self.op.blocking();
-        match op
-            .read(&path)
-            .ok()
-            .and_then(|v| bincode::deserialize::<u32>(&v).ok())
-        {
+        match op.read(&path).ok().and_then(|v| match v.try_into() {
+            Ok(v) => Some(u32::from_be_bytes(v)),
+            Err(_) => None,
+        }) {
             Some(next) => {
-                if let Ok(()) = op.write(&path, bincode::serialize(&(next + 1)).unwrap()) {
+                if let Ok(()) = op.write(&path, (next + 1).to_be_bytes().to_vec()) {
                     next + 1
                 } else {
                     0
                 }
             }
             None => {
-                if let Ok(()) = op.write(&path, bincode::serialize(&1).unwrap()) {
+                if let Ok(()) = op.write(&path, 1u32.to_be_bytes().to_vec()) {
                     1
                 } else {
                     0
@@ -198,12 +202,14 @@ impl Storage {
             .read(&path)
             .await
             .ok()
-            .and_then(|v| bincode::deserialize::<u32>(&v).ok())
-        {
+            .and_then(|v| match v.try_into() {
+                Ok(v) => Some(u32::from_be_bytes(v)),
+                Err(_) => None,
+            }) {
             Some(next) => {
                 if let Ok(()) = self
                     .op
-                    .write(&path, bincode::serialize(&(next + 1)).unwrap())
+                    .write(&path, (next + 1).to_be_bytes().to_vec())
                     .await
                 {
                     next + 1
@@ -212,7 +218,7 @@ impl Storage {
                 }
             }
             None => {
-                if let Ok(()) = self.op.write(&path, bincode::serialize(&1).unwrap()).await {
+                if let Ok(()) = self.op.write(&path, 1u32.to_be_bytes().to_vec()).await {
                     1
                 } else {
                     0
@@ -227,8 +233,8 @@ impl Storage {
             .blocking()
             .read(&(SEQUENCE_TREE_NAME.to_string() + "/" + name))
         {
-            if let Ok(next) = bincode::deserialize(&v[..4]) {
-                return next;
+            if let Ok(v) = v.try_into() {
+                return u32::from_be_bytes(v);
             }
         }
         0
@@ -240,16 +246,12 @@ impl Storage {
             .read(&(SEQUENCE_TREE_NAME.to_string() + "/" + name))
             .await
         {
-            if let Ok(next) = bincode::deserialize(&v[..4]) {
-                return next;
+            if let Ok(v) = v.try_into() {
+                return u32::from_be_bytes(v);
             }
         }
         0
     }
-}
-
-fn build_key<T: for<'a> Deserialize<'a> + StorageData>(key: impl AsRef<[u8]>) -> String {
-    T::name() + "/" + &String::from_utf8(key.as_ref().to_vec()).unwrap()
 }
 
 #[test]
@@ -273,20 +275,28 @@ fn list() {
     }
     let store = Storage::default();
     for i in 0..5 {
-        store.insert(
-            i.to_string(),
-            Test {
-                name: i.to_string(),
-            },
-        );
-        store.insert(
-            i.to_string(),
-            Test1 {
-                name: i.to_string(),
-            },
-        );
+        store
+            .insert(
+                &i.to_string(),
+                Test {
+                    name: i.to_string(),
+                },
+            )
+            .unwrap();
+        store
+            .insert(
+                &i.to_string(),
+                Test1 {
+                    name: i.to_string(),
+                },
+            )
+            .unwrap();
     }
     for i in store.scan::<Test>() {
-        println!("{:?}", store.read::<Test>(i.unwrap().path()).unwrap());
+        println!("{:?}", i);
+        println!(
+            "{:?}",
+            store.get_by_path::<Test>(i.unwrap().path()).unwrap()
+        );
     }
 }

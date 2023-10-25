@@ -1,6 +1,6 @@
 [package]
 name = "storage_dal_derive"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["JLer <jlerxky@live.com>"]
 edition = "2021"
 description = "storage_dal macro"

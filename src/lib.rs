@@ -21,7 +21,7 @@ pub trait StorageData: Debug + Clone + Default + for<'a> Deserialize<'a> + Seria
     fn name() -> String;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Storage {
     pub op: Operator,
 }
